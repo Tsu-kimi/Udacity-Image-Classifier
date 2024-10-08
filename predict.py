@@ -7,100 +7,111 @@ from math import ceil
 from train import check_gpu
 from torchvision import models
 
-def arg_parser():
-    parser = argparse.ArgumentParser(description="predict.py")
-    parser.add_argument('--image',type=str,help='Point to impage file for prediction.',required=True)
-    parser.add_argument('--checkpoint',type=str,help='Point to checkpoint file as str.',required=True)
-    parser.add_argument('--top_k',type=int,help='Choose top K matches as int.')
-    parser.add_argument('--category_names', dest="category_names", action="store", default='cat_to_name.json')
-    parser.add_argument('--gpu', default="gpu", action="store", dest="gpu")
+def get_input_args():
+    """Parse and return command line arguments."""
+    parser = argparse.ArgumentParser(description="Image prediction script")
+    parser.add_argument('--image', type=str, required=True, help='Path to the image for prediction')
+    parser.add_argument('--checkpoint', type=str, required=True, help='Path to the model checkpoint')
+    parser.add_argument('--top_k', type=int, default=5, help='Number of top K classes to return')
+    parser.add_argument('--category_names', type=str, default='cat_to_name.json', help='File with category names')
+    parser.add_argument('--gpu', type=str, default='gpu', help='Use GPU for inference if available')
 
-    args = parser.parse_args()
-    
-    return args
+    return parser.parse_args()
 
+def load_saved_model(checkpoint_path):
+    """Load the saved model checkpoint and rebuild the model."""
+    checkpoint = torch.load(checkpoint_path)
 
-def load_checkpoint(checkpoint_path):
-    
-    checkpoint = torch.load("checkpoint.pth")
-    
-     model = models.vgg16(pretrained=True)
-        model.name = "vgg16"
-    
-    
-    
-    for param in model.parameters(): 
-        param.requires_grad = False
-    
-    # Load from checkpoint
-    model.class_to_idx = checkpoint['class_to_idx']
+    # Load a pretrained model and modify it to match the saved checkpoint
+    model = models.vgg16(pretrained=True)
     model.classifier = checkpoint['classifier']
+    model.class_to_idx = checkpoint['class_to_idx']
     model.load_state_dict(checkpoint['state_dict'])
-    
+
+    # Ensure the parameters are not updated during training
+    for param in model.parameters():
+        param.requires_grad = False
+
     return model
 
-def process_image(image):
-    img = PIL.Image.open(image)
-
-    original_width, original_height = img.size
+def process_image(image_path):
+    """Preprocess an image for the model to use for inference."""
+    img = PIL.Image.open(image_path)
     
+    # Resize the image, maintaining aspect ratio
+    original_width, original_height = img.size
     if original_width < original_height:
-        size=[256, 256**600]
-    else: 
-        size=[256**600, 256]
-        
-    img.thumbnail(size)
-   
-    center = original_width/4, original_height/4
-    left, top, right, bottom = center[0]-(244/2), center[1]-(244/2), center[0]+(244/2), center[1]+(244/2)
+        img.thumbnail((256, int(256 * original_height / original_width)))
+    else:
+        img.thumbnail((int(256 * original_width / original_height), 256))
+
+    # Crop the center 224x224 of the image
+    left = (img.width - 224) / 2
+    top = (img.height - 224) / 2
+    right = left + 224
+    bottom = top + 224
     img = img.crop((left, top, right, bottom))
 
-    numpy_img = np.array(img)/255 
+    # Normalize and transpose image to match model expectations
+    np_img = np.array(img) / 255.0
+    means = np.array([0.485, 0.456, 0.406])
+    stds = np.array([0.229, 0.224, 0.225])
+    np_img = (np_img - means) / stds
+    np_img = np_img.transpose((2, 0, 1))
 
-    # Normalize each color channel
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    numpy_img = (numpy_img-mean)/std
-        
-    # Set the color to the first channel
-    numpy_img = numpy_img.transpose(2, 0, 1)
+    return np_img
+
+def predict(image_path, model, device, cat_to_name, top_k=5):
+    """Make predictions on the image and return the top K probabilities and corresponding classes."""
+    model.to(device)
+    model.eval()
     
-    return numpy_img
-
-ach())[0]
+    # Preprocess image and convert to tensor
+    image = process_image(image_path)
+    image_tensor = torch.from_numpy(image).type(torch.FloatTensor).unsqueeze(0).to(device)
     
-    # Convert to classes
-    idx_to_class = {val: key for key, val in    
-                                      model.class_to_idx.items()}
-    top_labels = [idx_to_class[lab] for lab in top_labels]
-    top_flowers = [cat_to_name[lab] for lab in top_labels]
+    with torch.no_grad():
+        # Perform inference
+        output = model.forward(image_tensor)
+        probabilities = torch.exp(output)
     
-    return top_probs, top_labels, top_flowers
+    # Get the top K probabilities and indices
+    top_probs, top_indices = probabilities.topk(top_k)
+    top_probs = top_probs.cpu().numpy()[0]
+    top_indices = top_indices.cpu().numpy()[0]
 
+    # Convert indices to classes
+    idx_to_class = {val: key for key, val in model.class_to_idx.items()}
+    top_classes = [idx_to_class[index] for index in top_indices]
+    top_flowers = [cat_to_name[str(cls)] for cls in top_classes]
+    
+    return top_probs, top_flowers
 
-def print_probability(probs, flowers):
-    #Converts two lists into a dictionary to print on screen
-    for i, j in enumerate(zip(flowers, probs)):
-        print ("Rank {}:".format(i+1),
-               "Flower: {}, liklihood: {}%".format(j[1], ceil(j[0]*100)))
-
+def display_predictions(probs, flowers):
+    """Print the top predicted flowers and their probabilities."""
+    for i, (flower, prob) in enumerate(zip(flowers, probs)):
+        print(f"Rank {i+1}: Flower = {flower}, Likelihood = {ceil(prob * 100)}%")
 
 def main():
-    
-    args = arg_parser()
-    
+    """Main function to run the script."""
+    # Get input arguments
+    args = get_input_args()
+
+    # Load category to name mapping
     with open(args.category_names, 'r') as f:
-        	cat_to_name = json.load(f)
+        cat_to_name = json.load(f)
 
-    model = load_checkpoint(args.checkpoint)
+    # Load the model from checkpoint
+    model = load_saved_model(args.checkpoint)
     
-    image_tensor = process_image(args.image)
+    # Determine if GPU should be used
+    device = check_gpu(args.gpu)
     
-    device = check_gpu(gpu_arg=args.gpu);
+    # Perform prediction
+    top_probs, top_flowers = predict(args.image, model, device, cat_to_name, args.top_k)
     
-    top_probs, top_labels, top_flowers = predict(image_tensor, model,device, cat_to_name,args.top_k)
-    
-    
-    print_probability(top_flowers, top_probs)
+    # Display the predictions
+    display_predictions(top_probs, top_flowers)
 
-if __name__ == '__main__': main()
+if __name__ == "__main__":
+    main()
